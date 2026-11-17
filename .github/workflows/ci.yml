@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  server:
+    name: Server syntax
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check offline-app/server.js
+          node --check offline-app/database.js
+          node --check offline-app/websocket.js
+          Get-ChildItem offline-app/src -Recurse -Filter *.js | ForEach-Object {
+            Write-Host "checking $($_.FullName)"
+            node --check $_.FullName
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+
+  frontends:
+    name: Frontend builds
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [offline-tauri-client, valerate-dashboard]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - name: Install dependencies
+        working-directory: ${{ matrix.app }}
+        run: npm ci
+
+      - name: Build
+        working-directory: ${{ matrix.app }}
+        run: npm run build
+
+  tauri:
+    name: Tauri compilation (${{ matrix.app }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [offline-tauri-client, valerate-dashboard]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ matrix.app }}/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.app }}/src-tauri
+
+      - name: Frontend bundle
+        working-directory: ${{ matrix.app }}
+        run: |
+          npm ci
+          npm run build
+
+      - name: Cargo check
+        working-directory: ${{ matrix.app }}/src-tauri
+        run: cargo check --release

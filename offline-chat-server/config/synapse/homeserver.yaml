@@ -1,0 +1,88 @@
+# ==============================================================================
+# MATRIX SYNAPSE HOMESERVER CONFIGURATION - 100% OFFLINE / AIR-GAPPED LAN
+# ==============================================================================
+# TEMPLATE FILE: ${VAR} placeholders are rendered by scripts/start.sh into
+# homeserver.runtime.yaml before Docker Compose starts. Never mount this file
+# directly: Docker Compose does not expand variables inside mounted files.
+
+# Server identity
+server_name: "${SERVER_NAME}"
+pid_file: /data/homeserver.pid
+
+# Network listeners
+listeners:
+  - port: 8008
+    tls: false
+    type: http
+    x_forwarded: true
+    bind_addresses: ['0.0.0.0']
+    resources:
+      - names: [client, federation]
+        compress: false
+
+# Database configuration (PostgreSQL)
+database:
+  name: psycopg2
+  args:
+    user: "${POSTGRES_USER}"
+    password: "${POSTGRES_PASSWORD}"
+    database: "${POSTGRES_DB}"
+    host: "postgres"
+    port: 5432
+    cp_min: 5
+    cp_max: 15
+
+# Persistent paths
+media_store_path: /data/media_store
+signing_key_path: /data/signing.key
+
+# Media and File Storage limits for offline LAN transfers
+max_upload_size: 500M
+max_image_pixels: "32M"
+dynamic_thumbnails: true
+url_preview_enabled: false
+
+# ------------------------------------------------------------------------------
+# AIR-GAP SECURITY & ZERO-TELEMETRY HARDENING
+# ------------------------------------------------------------------------------
+# Disable all external federation attempts
+federation_domain_whitelist: []
+allow_public_rooms_without_auth: false
+allow_public_rooms_over_federation: false
+
+# Completely eliminate outbound tracking, stats, telemetry, and external checks
+report_stats: false
+enable_metrics: false
+suppress_key_server_warning: true
+federation_metrics_domains: []
+enable_registration_captcha: false
+use_presence: true
+
+# User Registration controls
+# Open self-registration is disabled by default. Create accounts with:
+#   docker compose exec synapse register_new_matrix_user \
+#     -c /data/homeserver.yaml http://localhost:8008
+enable_registration: false
+enable_registration_without_verification: false
+registration_shared_secret: "${SYNAPSE_REGISTRATION_SHARED_SECRET}"
+macaroon_secret_key: "${SYNAPSE_MACAROON_SECRET_KEY}"
+form_secret: "${SYNAPSE_FORM_SECRET}"
+
+# ------------------------------------------------------------------------------
+# WEBRTC STUN / TURN CONFIGURATION (LOCAL COTURN CONTAINER)
+# ------------------------------------------------------------------------------
+# Point Matrix clients directly to the local Coturn container via LAN IP
+# No external Google STUN servers will ever be polled.
+turn_uris:
+  - "turn:${LAN_IP}:3478?transport=udp"
+  - "turn:${LAN_IP}:3478?transport=tcp"
+  - "turns:${LAN_IP}:5349?transport=udp"
+  - "turns:${LAN_IP}:5349?transport=tcp"
+
+turn_shared_secret: "${TURN_SHARED_SECRET}"
+turn_user_lifetime: 86400000
+turn_allow_guests: false
+
+# Retention policies (Optional: keep local history forever)
+retention:
+  enabled: false

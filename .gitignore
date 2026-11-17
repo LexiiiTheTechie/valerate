@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# Secrets, certificates and runtime data
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+
+# TLS material must never be committed
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+certs/
+pfx_password.txt
+
+# Server runtime data (accounts, chats, vault, audit logs)
+data/
+uploads/
+offline_db.json
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.log
+
+# ---------------------------------------------------------------------------
+# Dependencies and build output
+# ---------------------------------------------------------------------------
+node_modules/
+*/node_modules/
+
+# Frontend bundles (produced by `npm run build`)
+dist/
+*/dist/
+*/*/dist/
+
+# Rust / Tauri build output
+target/
+*/target/
+*/*/target/
+
+# Packaged portable release
+*.zip
+*.msi
+*.exe
+*.bak
+
+# ---------------------------------------------------------------------------
+# Generated runtime configuration
+# ---------------------------------------------------------------------------
+offline-chat-server/config/synapse/homeserver.runtime.yaml
+
+# ---------------------------------------------------------------------------
+# Editor / OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+
+# Local helper artifacts
+*.local
+tmp/

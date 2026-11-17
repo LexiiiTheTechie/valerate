@@ -1,0 +1,9 @@
+{
+  "name": "airgap-lan-chat",
+  "version": "1.0.0",
+  "description": "Zero-dependency offline LAN communication platform with real-time WebRTC voice/video and file transfers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}
