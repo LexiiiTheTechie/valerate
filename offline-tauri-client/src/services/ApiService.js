@@ -3,6 +3,7 @@ const SAFE_URL_SCHEMES = ['http:', 'https:', 'blob:', 'data:'];
 const DANGEROUS_CHARS_RE = /[\u0000-\u001F\u007F"'<>\\`]/;
 
 let sessionToken = null;
+let mediaBaseUrl = null;
 
 /**
  * Returns true if the URL is safe to load (relative path or allowed scheme).
@@ -23,17 +24,40 @@ function isSafeUrl(url) {
 }
 
 /**
+ * Resolves relative /uploads and /api/vault paths against the active server so
+ * the Tauri webview (different origin) can load avatars and attachments.
+ */
+function resolveMediaUrl(url) {
+  if (!url || typeof url !== 'string') return url;
+  if (!mediaBaseUrl) return url;
+  if (url.startsWith('/') && !url.startsWith('//')) {
+    return `${mediaBaseUrl.replace(/\/$/, '')}${url}`;
+  }
+  return url;
+}
+
+/**
  * Appends the current session token to protected media URLs. Tokens are only
  * added to /uploads/ and /api/vault/ paths, never to third-party URLs.
  */
 function withMediaToken(url) {
   if (!sessionToken || typeof url !== 'string') return url;
   try {
-    const parsed = new URL(url, 'https://local.invalid');
+    const parsed = new URL(url, mediaBaseUrl || 'https://local.invalid');
     if (!/^\/(?:uploads|api\/vault)\/[A-Za-z0-9._-]+$/.test(parsed.pathname)) return url;
     if (parsed.searchParams.has('token')) return url;
     parsed.searchParams.set('token', sessionToken);
-    return url.startsWith('/') ? `${parsed.pathname}${parsed.search}` : parsed.toString();
+    if (url.startsWith('/') && !mediaBaseUrl) {
+      return `${parsed.pathname}${parsed.search}`;
+    }
+    // Prefer an absolute URL when we know the server base (Tauri needs this).
+    if (mediaBaseUrl) {
+      const base = new URL(mediaBaseUrl);
+      parsed.protocol = base.protocol;
+      parsed.host = base.host;
+      return parsed.toString();
+    }
+    return parsed.toString();
   } catch {
     return url;
   }
@@ -49,21 +73,70 @@ export const ApiService = {
   },
 
   /**
+   * Records the LAN server origin used to resolve relative media URLs inside
+   * the desktop webview (which is not same-origin with the Node server).
+   */
+  setMediaBaseUrl(url) {
+    if (typeof url === 'string' && url) {
+      mediaBaseUrl = url.replace(/\/$/, '');
+    } else {
+      mediaBaseUrl = null;
+    }
+  },
+
+  /**
    * Returns the URL unchanged (with the session token appended for protected
    * media) if it is safe, otherwise returns null. Use this before rendering
    * any server-supplied URL in <img>, <video>, <audio>, or <a href>.
    */
   sanitizeUrl(url) {
-    return isSafeUrl(url) ? withMediaToken(url) : null;
+    if (!isSafeUrl(url)) return null;
+    return withMediaToken(resolveMediaUrl(url));
+  },
+
+  /**
+   * Fetches a media URL and triggers a real Save dialog via a same-origin
+   * blob: link. Needed because the HTML download attribute is ignored for
+   * cross-origin URLs (Tauri webview → LAN server), and WKWebView often
+   * swallows attachment navigations without prompting.
+   */
+  async downloadFile(url, fileName = 'download') {
+    const safe = this.sanitizeUrl(url);
+    if (!safe) {
+      return { error: 'Invalid download URL.' };
+    }
+    try {
+      const res = await fetch(safe);
+      if (!res.ok) {
+        return { error: `Download failed (${res.status})` };
+      }
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = objectUrl;
+      anchor.download = fileName || 'download';
+      anchor.rel = 'noopener';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      // Revoke after the browser has had a chance to start the download.
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 2_000);
+      return { success: true };
+    } catch (err) {
+      return { error: `Download failed: ${err.message}` };
+    }
   },
 
   async uploadFile(serverUrl, file, token = null, options = {}) {
     const endpoint = options.vault ? '/api/vault/upload' : '/api/upload';
-    const headers = {};
+    const base = String(serverUrl || '').replace(/\/$/, '');
+    const headers = {
+      'Content-Type': file.type || 'application/octet-stream'
+    };
     if (token) headers['Authorization'] = `Bearer ${token}`;
     try {
       const res = await fetch(
-        `${serverUrl}${endpoint}?filename=${encodeURIComponent(file.name)}`,
+        `${base}${endpoint}?filename=${encodeURIComponent(file.name)}`,
         { method: 'POST', headers, body: file }
       );
       const data = await res.json().catch(() => ({}));
@@ -78,11 +151,12 @@ export const ApiService = {
 
   async uploadMultipleFiles(serverUrl, fileList, token = null, onProgress = null, options = {}) {
     const results = [];
+    const base = String(serverUrl || '').replace(/\/$/, '');
     for (let i = 0; i < fileList.length; i++) {
       const file = fileList[i];
       const relPath = file.webkitRelativePath || '';
       const folderPath = relPath.includes('/') ? '/' + relPath.substring(0, relPath.lastIndexOf('/')) : '/';
-      const data = await this.uploadFile(serverUrl, file, token, options);
+      const data = await this.uploadFile(base, file, token, options);
       if (data.url) {
         const ext = file.name.split('.').pop().toLowerCase();
         results.push({
@@ -90,7 +164,7 @@ export const ApiService = {
           fileName: file.name,
           folderPath,
           fileSize: file.size,
-          fileUrl: `${serverUrl}${data.url}`,
+          fileUrl: `${base}${data.url}`,
           fileType: ext
         });
       }

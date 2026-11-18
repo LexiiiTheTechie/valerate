@@ -90,6 +90,13 @@ function FolderNode({ node, selectedPath, onSelect, depth = 0 }) {
   );
 }
 
+async function triggerDownload(url, fileName) {
+  const result = await ApiService.downloadFile(url, fileName || 'download');
+  if (result.error) {
+    window.alert(result.error);
+  }
+}
+
 /** File row in the list pane */
 function FileRow({ file, isSelected, onSelect, onDelete }) {
   const ext = (file.fileType || '').toLowerCase();
@@ -119,7 +126,15 @@ function FileRow({ file, isSelected, onSelect, onDelete }) {
       </div>
 
       <div className="file-row-actions" onClick={e => e.stopPropagation()}>
-        {safeUrl && <a href={safeUrl} download={file.fileName} className="vault-action-btn">⬇ Download</a>}
+        {safeUrl && (
+          <button
+            type="button"
+            className="vault-action-btn"
+            onClick={() => triggerDownload(safeUrl, file.fileName)}
+          >
+            ⬇ Download
+          </button>
+        )}
         <button className="vault-action-btn delete" onClick={() => onDelete(file.id)}>🗑 Delete</button>
       </div>
     </div>
@@ -178,9 +193,14 @@ function PreviewPane({ file, onClose }) {
 
       {safeUrl && (
         <div style={{ marginTop: 16 }}>
-          <a href={safeUrl} download={file.fileName} className="btn btn-primary" style={{ textDecoration: 'none', display: 'flex' }}>
+          <button
+            type="button"
+            className="btn btn-primary"
+            style={{ display: 'flex', width: '100%', justifyContent: 'center' }}
+            onClick={() => triggerDownload(safeUrl, file.fileName)}
+          >
             ⬇ Download File
-          </a>
+          </button>
         </div>
       )}
     </div>

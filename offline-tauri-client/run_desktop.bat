@@ -1,11 +1,11 @@
 @echo off
 setlocal EnableExtensions
-title AirGap Desktop Client (React + Tauri)
+title Valerate Desktop Client (React + Tauri)
 color 0b
 cd /d "%~dp0"
 
 echo ==============================================================
-echo           AIRGAP LAN DESKTOP CLIENT (TAURI + REACT)
+echo           VALERATE LAN DESKTOP CLIENT (TAURI + REACT)
 echo ==============================================================
 echo.
 

@@ -40,7 +40,7 @@ function listenTauri(event, handler) {
 
 export default function App() {
   const [processes, setProcesses] = useState([
-    { id: 'server-main', kind: 'server', title: 'AirGap Server (Node.js)', running: false, pid: null },
+    { id: 'server-main', kind: 'server', title: 'Valerate Server (Node.js)', running: false, pid: null },
   ]);
   const [selectedProcessId, setSelectedProcessId] = useState('server-main');
   const [logs, setLogs] = useState({});

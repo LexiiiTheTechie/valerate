@@ -1,5 +1,5 @@
 {
-  "name": "airgap-lan-chat",
+  "name": "valerate-lan-chat",
   "version": "1.0.0",
   "description": "Zero-dependency offline LAN communication platform with real-time WebRTC voice/video and file transfers",
   "main": "server.js",

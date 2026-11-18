@@ -34,9 +34,10 @@ const APP_CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' https: data: blob:",
-  "media-src 'self' https: blob:",
-  "connect-src 'self' ws: wss:",
+  // http: is required when ALLOW_HTTP=1 (local / trusted LAN development).
+  "img-src 'self' http: https: data: blob:",
+  "media-src 'self' http: https: blob:",
+  "connect-src 'self' http: https: ws: wss:",
   "font-src 'self' data:",
   "object-src 'none'",
   "base-uri 'self'",
@@ -62,11 +63,20 @@ class FileService {
     return base.slice(0, 180) || `file_${Date.now()}`;
   }
 
-  _contentDisposition(fileName) {
+  _contentDisposition(fileName, disposition = 'attachment') {
     const ascii = String(fileName || 'download')
       .replace(/[^\x20-\x7E]/g, '_')
       .replace(/["\\]/g, '_');
-    return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName || 'download')}`;
+    const kind = disposition === 'inline' ? 'inline' : 'attachment';
+    return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(fileName || 'download')}`;
+  }
+
+  _isInlineMedia(contentType) {
+    return (
+      contentType.startsWith('image/') ||
+      contentType.startsWith('video/') ||
+      contentType.startsWith('audio/')
+    );
   }
 
   handleUpload(req, res, searchParams, options = {}) {
@@ -184,13 +194,17 @@ class FileService {
 
     const stat = fs.statSync(resolved);
     const contentType = this.getMimeType(resolved);
+    // Images/media must be inline so avatars and chat previews render. CORP is
+    // cross-origin because the Tauri desktop client loads these from a
+    // different origin than the LAN server.
+    const disposition = this._isInlineMedia(contentType) ? 'inline' : 'attachment';
     const baseHeaders = {
       'Content-Type': contentType,
-      'Content-Disposition': this._contentDisposition(filename),
+      'Content-Disposition': this._contentDisposition(filename, disposition),
       'X-Content-Type-Options': 'nosniff',
       'Content-Security-Policy': "default-src 'none'; sandbox",
       'Referrer-Policy': 'no-referrer',
-      'Cross-Origin-Resource-Policy': 'same-origin',
+      'Cross-Origin-Resource-Policy': 'cross-origin',
       'Cache-Control': 'private, no-store'
     };
     const range = req.headers.range;

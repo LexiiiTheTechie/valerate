@@ -244,7 +244,7 @@ async function existingValerateServer(port) {
     const res = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal });
     const text = await res.text();
     clearTimeout(timer);
-    return res.ok && /AirGap LAN Messenger|AirGap Desktop/i.test(text);
+    return res.ok && /Valerate LAN Messenger|Valerate Desktop/i.test(text);
   } catch (_) {
     return false;
   }

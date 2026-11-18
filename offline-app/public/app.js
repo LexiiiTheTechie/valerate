@@ -15,6 +15,7 @@
     let pc = null;
     let localStream = null;
     let activeCallUser = null;
+    let pendingIceCandidates = [];
 
     function connect() {
       const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -125,10 +126,22 @@
           handleIncomingCall(msg);
           break;
         case 'webrtc_call_answer':
-          if (pc) pc.setRemoteDescription(new RTCSessionDescription(msg.answer));
+          if (pc) {
+            pc.setRemoteDescription(new RTCSessionDescription(msg.answer))
+              .then(flushPendingIce)
+              .catch(e => console.error('Could not apply call answer:', e));
+          }
           break;
         case 'webrtc_ice_candidate':
-          if (pc && msg.candidate) pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          if (!msg.candidate) break;
+          // Candidates can arrive before setRemoteDescription (while the
+          // callee is still deciding). Buffer them so the call can connect.
+          if (pc && pc.remoteDescription) {
+            pc.addIceCandidate(new RTCIceCandidate(msg.candidate))
+              .catch(e => console.warn('Could not add ICE candidate:', e));
+          } else {
+            pendingIceCandidates.push(msg.candidate);
+          }
           break;
         case 'webrtc_call_hangup':
           endCall(false);
@@ -592,11 +605,36 @@
           audio.style.width = '100%';
           bubble.appendChild(audio);
         } else {
-          const link = document.createElement('a');
-          link.href = mediaUrl;
-          link.download = msg.fileName || 'file';
+          // Fetch→blob→object URL so the Save dialog works even when the
+          // media host differs from the page origin (and in desktop webviews).
+          const link = document.createElement('button');
+          link.type = 'button';
           link.className = 'file-attachment';
           link.textContent = `💾 Download ${msg.fileName || 'File'}`;
+          link.onclick = async () => {
+            if (link.disabled) return;
+            const label = link.textContent;
+            link.disabled = true;
+            link.textContent = '⬇ Saving…';
+            try {
+              const res = await fetch(mediaUrl);
+              if (!res.ok) throw new Error(`Download failed (${res.status})`);
+              const blob = await res.blob();
+              const objectUrl = URL.createObjectURL(blob);
+              const anchor = document.createElement('a');
+              anchor.href = objectUrl;
+              anchor.download = msg.fileName || 'download';
+              document.body.appendChild(anchor);
+              anchor.click();
+              anchor.remove();
+              setTimeout(() => URL.revokeObjectURL(objectUrl), 2000);
+              link.textContent = label;
+            } catch (_) {
+              link.textContent = '⚠ Retry download';
+            } finally {
+              link.disabled = false;
+            }
+          };
           bubble.appendChild(link);
         }
       }
@@ -618,6 +656,31 @@
     document.getElementById('btnVoiceCall').onclick = () => startCall(false);
     document.getElementById('btnEndCall').onclick = () => endCall(true);
 
+    async function flushPendingIce() {
+      if (!pc) return;
+      const pending = pendingIceCandidates;
+      pendingIceCandidates = [];
+      for (const candidate of pending) {
+        try {
+          await pc.addIceCandidate(new RTCIceCandidate(candidate));
+        } catch (e) {
+          console.warn('Could not add queued ICE candidate:', e);
+        }
+      }
+    }
+
+    function buildPeerConnection(target) {
+      const connection = new RTCPeerConnection();
+      pc = connection;
+      connection.ontrack = (e) => { document.getElementById('remoteVideo').srcObject = e.streams[0]; };
+      connection.onicecandidate = (e) => {
+        if (e.candidate) {
+          ws.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: target, candidate: e.candidate }));
+        }
+      };
+      return connection;
+    }
+
     async function startCall(isVideo) {
       let target = null;
       if (currentChannelId.startsWith('dm_')) {
@@ -633,72 +696,81 @@
       }
 
       activeCallUser = target.toLowerCase();
+      pendingIceCandidates = [];
       document.getElementById('videoViewport').style.display = 'flex';
       document.getElementById('btnEndCall').style.display = 'inline-block';
       document.getElementById('remotePeerLabel').textContent = '@' + activeCallUser;
 
-      localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
-      document.getElementById('localVideo').srcObject = localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
+        document.getElementById('localVideo').srcObject = localStream;
 
-      pc = new RTCPeerConnection();
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        const connection = buildPeerConnection(activeCallUser);
+        localStream.getTracks().forEach(t => connection.addTrack(t, localStream));
 
-      pc.ontrack = (e) => { document.getElementById('remoteVideo').srcObject = e.streams[0]; };
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          ws.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: activeCallUser, candidate: e.candidate }));
-        }
-      };
+        const offer = await connection.createOffer();
+        await connection.setLocalDescription(offer);
 
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      ws.send(JSON.stringify({
-        type: 'webrtc_call_invite',
-        targetUser: activeCallUser,
-        isVideo,
-        offer
-      }));
+        ws.send(JSON.stringify({
+          type: 'webrtc_call_invite',
+          targetUser: activeCallUser,
+          isVideo,
+          offer
+        }));
+      } catch (e) {
+        console.error('Call media error:', e);
+        endCall(false);
+        alert(`Could not access your camera or microphone: ${e.message || e}`);
+      }
     }
 
     async function handleIncomingCall(msg) {
+      if (activeCallUser) {
+        // Already on a call: decline additional invites instead of hijacking it.
+        ws.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: msg.fromUser }));
+        return;
+      }
       if (!confirm(`Incoming ${msg.isVideo ? 'Video' : 'Voice'} call from @${msg.fromUser}. Answer?`)) {
         ws.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: msg.fromUser }));
         return;
       }
 
       activeCallUser = msg.fromUser;
+      pendingIceCandidates = [];
       document.getElementById('videoViewport').style.display = 'flex';
       document.getElementById('btnEndCall').style.display = 'inline-block';
       document.getElementById('remotePeerLabel').textContent = '@' + activeCallUser;
 
-      localStream = await navigator.mediaDevices.getUserMedia({ video: msg.isVideo, audio: true });
-      document.getElementById('localVideo').srcObject = localStream;
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: msg.isVideo, audio: true });
+        document.getElementById('localVideo').srcObject = localStream;
 
-      pc = new RTCPeerConnection();
-      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
-      pc.ontrack = (e) => { document.getElementById('remoteVideo').srcObject = e.streams[0]; };
-      pc.onicecandidate = (e) => {
-        if (e.candidate) {
-          ws.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: activeCallUser, candidate: e.candidate }));
-        }
-      };
+        const connection = buildPeerConnection(activeCallUser);
+        localStream.getTracks().forEach(t => connection.addTrack(t, localStream));
 
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+        await connection.setRemoteDescription(new RTCSessionDescription(msg.offer));
+        // Apply ICE candidates the caller sent while this call was ringing.
+        await flushPendingIce();
+        const answer = await connection.createAnswer();
+        await connection.setLocalDescription(answer);
 
-      ws.send(JSON.stringify({
-        type: 'webrtc_call_answer',
-        targetUser: activeCallUser,
-        answer
-      }));
+        ws.send(JSON.stringify({
+          type: 'webrtc_call_answer',
+          targetUser: activeCallUser,
+          answer
+        }));
+      } catch (e) {
+        console.error('Call media error:', e);
+        endCall(true);
+        alert(`Could not answer the call: ${e.message || e}`);
+      }
     }
 
     function endCall(notify) {
       if (notify && activeCallUser) {
         ws.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: activeCallUser }));
       }
+      pendingIceCandidates = [];
       if (pc) { pc.close(); pc = null; }
       if (localStream) { localStream.getTracks().forEach(t => t.stop()); localStream = null; }
       document.getElementById('videoViewport').style.display = 'none';

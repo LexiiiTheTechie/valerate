@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title AirGap Offline LAN Messenger - Server
+title Valerate Offline LAN Messenger - Server
 color 0b
 cd /d "%~dp0"
 

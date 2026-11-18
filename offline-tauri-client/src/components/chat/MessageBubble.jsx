@@ -1,10 +1,22 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { ApiService } from '../../services/ApiService';
 
 export default function MessageBubble({ message, onUserClick }) {
   const timeStr = new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   const safeMediaUrl = ApiService.sanitizeUrl(message.mediaUrl);
   const safeAvatarUrl = ApiService.sanitizeUrl(message.avatarUrl);
+  const [downloadState, setDownloadState] = useState('idle'); // idle | busy | error
+
+  async function handleDownload(event) {
+    event.preventDefault();
+    if (!safeMediaUrl || downloadState === 'busy') return;
+    setDownloadState('busy');
+    const result = await ApiService.downloadFile(safeMediaUrl, message.fileName || 'download');
+    setDownloadState(result.error ? 'error' : 'idle');
+    if (result.error) {
+      window.setTimeout(() => setDownloadState('idle'), 2500);
+    }
+  }
 
   return (
     <div className="msg-group">
@@ -40,9 +52,19 @@ export default function MessageBubble({ message, onUserClick }) {
             <audio src={safeMediaUrl} controls style={{ width: '100%', marginTop: 8 }} />
           )}
           {safeMediaUrl && message.mediaType === 'file' && (
-            <a href={safeMediaUrl} download={message.fileName} className="file-attachment">
-              💾 Download {message.fileName}
-            </a>
+            <button
+              type="button"
+              className="file-attachment"
+              onClick={handleDownload}
+              disabled={downloadState === 'busy'}
+              title={downloadState === 'error' ? 'Download failed — try again' : undefined}
+            >
+              {downloadState === 'busy'
+                ? '⬇ Saving…'
+                : downloadState === 'error'
+                  ? '⚠ Retry download'
+                  : `💾 Download ${message.fileName || 'file'}`}
+            </button>
           )}
         </div>
       </div>

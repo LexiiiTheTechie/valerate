@@ -1,4 +1,4 @@
-# AirGap LAN Messenger - Desktop App (Tauri v2 + React)
+# Valerate LAN Messenger - Desktop App (Tauri v2 + React)
 
 A native desktop application built with **Rust (Tauri v2)** and **React 18** that connects to your offline LAN server over local Wi-Fi / Ethernet.
 
@@ -38,4 +38,4 @@ npm run tauri build
 ```
 
 The compiled release `.exe` will be located in:
-`src-tauri/target/release/AirGap Messenger.exe`
+`src-tauri/target/release/Valerate Messenger.exe`

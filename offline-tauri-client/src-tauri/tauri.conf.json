@@ -1,15 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AirGap Messenger",
+  "productName": "Valerate Messenger",
   "version": "1.0.0",
-  "identifier": "com.offline.airgap",
+  "identifier": "com.offline.valerate",
   "build": {
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
-        "title": "AirGap LAN Messenger",
+        "title": "Valerate LAN Messenger",
         "width": 1180,
         "height": 780,
         "minWidth": 900,
@@ -23,7 +23,10 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["app"],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

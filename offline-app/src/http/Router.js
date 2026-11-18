@@ -42,6 +42,59 @@ class Router {
     return null;
   }
 
+  /**
+   * Desktop Tauri clients (and other LAN browsers) are cross-origin relative to
+   * this server. Allow same-host, private-LAN, and Tauri webview origins so
+   * authenticated uploads and media fetches work. Public internet origins are
+   * still rejected.
+   */
+  _isAllowedCorsOrigin(origin, requestHost) {
+    if (!origin || typeof origin !== 'string') return false;
+
+    // Custom schemes used by Tauri 2 webviews (esp. macOS WKWebView).
+    const tauriSchemes = [
+      'tauri://localhost',
+      'asset://localhost',
+      'ipc://localhost',
+      'http://tauri.localhost',
+      'https://tauri.localhost',
+      'http://ipc.localhost',
+      'https://ipc.localhost'
+    ];
+    if (tauriSchemes.includes(origin.toLowerCase())) return true;
+
+    let parsedOrigin;
+    try {
+      parsedOrigin = new URL(origin);
+    } catch (_) {
+      return false;
+    }
+
+    if (!['http:', 'https:'].includes(parsedOrigin.protocol)) return false;
+
+    const originHost = parsedOrigin.host.toLowerCase();
+    if (originHost === String(requestHost || '').toLowerCase()) return true;
+
+    const hostname = parsedOrigin.hostname.toLowerCase();
+    if (
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === 'tauri.localhost' ||
+      hostname === 'ipc.localhost'
+    ) {
+      return true;
+    }
+
+    // Private / link-local IPv4 (LAN clients talking to this host).
+    return (
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname) ||
+      /^169\.254\./.test(hostname)
+    );
+  }
+
   _setCommonHeaders(req, res) {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -50,19 +103,13 @@ class Router {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains');
 
-    // Same-origin CORS only: never reflect arbitrary origins, and never use *.
     const origin = req.headers.origin;
-    if (typeof origin === 'string' && origin) {
-      try {
-        const parsedOrigin = new URL(origin);
-        const requestHost = (req.headers.host || '').toLowerCase();
-        if (parsedOrigin.host.toLowerCase() === requestHost) {
-          res.setHeader('Access-Control-Allow-Origin', origin);
-          res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-          res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-          res.setHeader('Vary', 'Origin');
-        }
-      } catch (_) { /* ignore malformed Origin */ }
+    const requestHost = (req.headers.host || '').toLowerCase();
+    if (this._isAllowedCorsOrigin(origin, requestHost)) {
+      res.setHeader('Access-Control-Allow-Origin', origin);
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Vary', 'Origin');
     }
   }
 

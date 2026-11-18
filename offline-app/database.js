@@ -115,7 +115,7 @@ class OfflineDatabase {
   createUser(username, displayName, salt, hash, avatarColor) {
     this.db.prepare(`
       INSERT INTO users (username, display_name, salt, hash, avatar_color, avatar_url, bio, created_at)
-      VALUES (?, ?, ?, ?, ?, NULL, 'Hey there! I am using AirGap LAN Messenger.', ?)
+      VALUES (?, ?, ?, ?, ?, NULL, 'Hey there! I am using Valerate LAN Messenger.', ?)
     `).run(username.toLowerCase(), displayName, salt, hash, avatarColor, Date.now());
   }
 

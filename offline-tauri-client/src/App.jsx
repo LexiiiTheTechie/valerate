@@ -51,6 +51,8 @@ export default function App() {
   const remoteVideoRef = useRef(null);
   const pcRef = useRef(null);
   const localStreamRef = useRef(null);
+  const activeCallRef = useRef(null);
+  const pendingIceRef = useRef([]);
 
   const wsRef = useRef(null);
   const sessionTokenRef = useRef(null); // stores the session token for authenticated HTTP requests
@@ -73,6 +75,7 @@ export default function App() {
     const cleanBase = baseHttpUrl.trim().replace(/\/+$/, '');
     const wsUrl = cleanBase.replace(/^http/i, 'ws');
     setConnectionStatus('connecting');
+    ApiService.setMediaBaseUrl(cleanBase);
 
     try {
       const ws = new WebSocket(wsUrl);
@@ -81,6 +84,7 @@ export default function App() {
       ws.onopen = () => {
         setConnectionStatus('connected');
         setAuthError('');
+        ApiService.setMediaBaseUrl(cleanBase);
       };
 
       ws.onmessage = (event) => {
@@ -99,6 +103,7 @@ export default function App() {
 
       ws.onclose = () => {
         ApiService.setSessionToken(null);
+        ApiService.setMediaBaseUrl(null);
         setConnectionStatus('disconnected');
       };
     } catch (e) {
@@ -114,6 +119,7 @@ export default function App() {
           setUser(msg.user);
           sessionTokenRef.current = msg.token; // store for authenticated uploads
           ApiService.setSessionToken(msg.token);
+          ApiService.setMediaBaseUrl(serverUrl);
           setChannels(msg.channels);
           setFriends(msg.friends);
           setFriendRequests(msg.friendRequests);
@@ -130,6 +136,7 @@ export default function App() {
         setUser(null);
         sessionTokenRef.current = null;
         ApiService.setSessionToken(null);
+        ApiService.setMediaBaseUrl(null);
         break;
 
       case 'personal_files_updated':
@@ -185,10 +192,25 @@ export default function App() {
         handleIncomingCall(msg);
         break;
       case 'webrtc_call_answer':
-        if (pcRef.current) pcRef.current.setRemoteDescription(new RTCSessionDescription(msg.answer));
+        if (pcRef.current) {
+          pcRef.current
+            .setRemoteDescription(new RTCSessionDescription(msg.answer))
+            .then(flushPendingIce)
+            .catch(e => console.error('Could not apply call answer:', e));
+        }
         break;
       case 'webrtc_ice_candidate':
-        if (pcRef.current && msg.candidate) pcRef.current.addIceCandidate(new RTCIceCandidate(msg.candidate));
+        if (!msg.candidate) break;
+        // Candidates often arrive before the remote description is applied
+        // (e.g. while the callee is still deciding whether to answer). Buffer
+        // them instead of dropping them, otherwise the call can stay stuck.
+        if (pcRef.current && pcRef.current.remoteDescription) {
+          pcRef.current
+            .addIceCandidate(new RTCIceCandidate(msg.candidate))
+            .catch(e => console.warn('Could not add ICE candidate:', e));
+        } else {
+          pendingIceRef.current.push(msg.candidate);
+        }
         break;
       case 'webrtc_call_hangup':
         endCall(false);
@@ -253,6 +275,7 @@ export default function App() {
 
   // Personal Storage Multiple / Folder Uploads
   async function handleUploadPersonalFiles(fileList) {
+    ApiService.setMediaBaseUrl(serverUrl);
     const uploadedBatch = await ApiService.uploadMultipleFiles(
       serverUrl,
       fileList,
@@ -268,7 +291,7 @@ export default function App() {
     } else {
       setConfirmDialog({
         title: 'Upload Failed',
-        message: 'No files were uploaded. Make sure you are signed in and the server is reachable over HTTPS.',
+        message: 'No files were uploaded. Make sure you are signed in and the Server URL points at a running Valerate server.',
         confirmText: 'OK',
         showCancel: false,
         onConfirm: () => setConfirmDialog(null)
@@ -304,6 +327,7 @@ export default function App() {
   }
 
   async function uploadChatFile(file) {
+    ApiService.setMediaBaseUrl(serverUrl);
     const data = await ApiService.uploadFile(serverUrl, file, sessionTokenRef.current);
     if (data.error) {
       setConfirmDialog({
@@ -339,6 +363,7 @@ export default function App() {
   async function saveProfile(avatarFile) {
     let avatarUrl = user.avatarUrl;
     if (avatarFile) {
+      ApiService.setMediaBaseUrl(serverUrl);
       const data = await ApiService.uploadFile(serverUrl, avatarFile, sessionTokenRef.current);
       if (data.error) {
         setConfirmDialog({
@@ -350,7 +375,9 @@ export default function App() {
         });
         return;
       }
-      if (data.url) avatarUrl = `${serverUrl}${data.url}`;
+      // Store a relative /uploads/... path so every client (web + desktop) can
+      // resolve it against its own server URL.
+      if (data.url) avatarUrl = data.url;
     }
 
     wsRef.current.send(JSON.stringify({
@@ -363,6 +390,34 @@ export default function App() {
   }
 
   // WebRTC Calling
+  async function flushPendingIce() {
+    const pc = pcRef.current;
+    if (!pc) return;
+    const pending = pendingIceRef.current;
+    pendingIceRef.current = [];
+    for (const candidate of pending) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } catch (e) {
+        console.warn('Could not add queued ICE candidate:', e);
+      }
+    }
+  }
+
+  function buildPeerConnection(target) {
+    const pc = new RTCPeerConnection();
+    pcRef.current = pc;
+
+    pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]; };
+    pc.onicecandidate = (e) => {
+      if (e.candidate && wsRef.current) {
+        wsRef.current.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: target, candidate: e.candidate }));
+      }
+    };
+
+    return pc;
+  }
+
   async function startCall(isVideo) {
     let target = null;
     if (activeChannelId.startsWith('dm_')) {
@@ -370,52 +425,81 @@ export default function App() {
     }
     if (!target) target = prompt('Enter username to call:');
     if (!target) return;
+    target = target.trim().toLowerCase();
+
+    if (!onlineUsers.includes(target)) {
+      setConfirmDialog({
+        title: 'User Offline',
+        message: `@${target} is not online, so the call cannot be placed.`,
+        confirmText: 'OK',
+        showCancel: false
+      });
+      return;
+    }
 
     setActiveCall({ target, isVideo });
-    const stream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
-    localStreamRef.current = stream;
-    if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    activeCallRef.current = { target, isVideo };
+    pendingIceRef.current = [];
 
-    const pc = new RTCPeerConnection();
-    pcRef.current = pc;
-    stream.getTracks().forEach(t => pc.addTrack(t, stream));
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: isVideo, audio: true });
+      localStreamRef.current = stream;
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
-    pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]; };
-    pc.onicecandidate = (e) => {
-      if (e.candidate) wsRef.current.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: target, candidate: e.candidate }));
-    };
+      const pc = buildPeerConnection(target);
+      stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    wsRef.current.send(JSON.stringify({ type: 'webrtc_call_invite', targetUser: target, isVideo, offer }));
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      wsRef.current.send(JSON.stringify({ type: 'webrtc_call_invite', targetUser: target, isVideo, offer }));
+    } catch (e) {
+      console.error('Call media error:', e);
+      endCall(false);
+      setConfirmDialog({
+        title: 'Cannot Start Call',
+        message: `Could not access your camera or microphone: ${e.message || e}`,
+        confirmText: 'OK',
+        showCancel: false
+      });
+    }
   }
 
   async function acceptCall(msg) {
     setActiveCall({ target: msg.fromUser, isVideo: msg.isVideo });
+    activeCallRef.current = { target: msg.fromUser, isVideo: msg.isVideo };
+    pendingIceRef.current = [];
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: msg.isVideo, audio: true });
       localStreamRef.current = stream;
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
 
-      const pc = new RTCPeerConnection();
-      pcRef.current = pc;
+      const pc = buildPeerConnection(msg.fromUser);
       stream.getTracks().forEach(t => pc.addTrack(t, stream));
-      pc.ontrack = (e) => { if (remoteVideoRef.current) remoteVideoRef.current.srcObject = e.streams[0]; };
-      pc.onicecandidate = (e) => {
-        if (e.candidate) wsRef.current.send(JSON.stringify({ type: 'webrtc_ice_candidate', targetUser: msg.fromUser, candidate: e.candidate }));
-      };
 
       await pc.setRemoteDescription(new RTCSessionDescription(msg.offer));
+      // Apply any ICE candidates the caller sent while this call was ringing.
+      await flushPendingIce();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       wsRef.current.send(JSON.stringify({ type: 'webrtc_call_answer', targetUser: msg.fromUser, answer }));
     } catch (e) {
       console.error('Call media error:', e);
       endCall(true);
+      setConfirmDialog({
+        title: 'Cannot Answer Call',
+        message: `Could not access your camera or microphone: ${e.message || e}`,
+        confirmText: 'OK',
+        showCancel: false
+      });
     }
   }
 
   function handleIncomingCall(msg) {
+    // Only one call at a time: politely decline additional invites.
+    if (activeCallRef.current) {
+      wsRef.current?.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: msg.fromUser }));
+      return;
+    }
     setConfirmDialog({
       title: 'Incoming LAN Call',
       message: `Incoming ${msg.isVideo ? 'Video' : 'Voice'} call from @${msg.fromUser}.\nWould you like to answer?`,
@@ -434,9 +518,12 @@ export default function App() {
   }
 
   function endCall(notify) {
-    if (notify && activeCall) {
-      wsRef.current.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: activeCall.target }));
+    const call = activeCallRef.current || activeCall;
+    if (notify && call) {
+      wsRef.current?.send(JSON.stringify({ type: 'webrtc_call_hangup', targetUser: call.target }));
     }
+    pendingIceRef.current = [];
+    activeCallRef.current = null;
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null; }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach(t => t.stop()); localStreamRef.current = null; }
     setActiveCall(null);
@@ -454,7 +541,7 @@ export default function App() {
       {!user && (
         <div className="modal-overlay">
           <div className="modal-box">
-            <h2 style={{ color: 'var(--primary)', marginBottom: 8 }}>AirGap Desktop</h2>
+            <h2 style={{ color: 'var(--primary)', marginBottom: 8 }}>Valerate Desktop</h2>
             <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 20 }}>Offline LAN Messenger & Cloud Vault</p>
 
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -500,7 +587,7 @@ export default function App() {
         <div className="sidebar-header">
           <div className="brand">
             <div className="brand-dot"></div>
-            <span>AirGap Desktop</span>
+            <span>Valerate Desktop</span>
           </div>
           <span style={{ fontSize: 11, color: 'var(--success)', fontWeight: 'bold' }}>LAN</span>
         </div>

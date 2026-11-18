@@ -93,7 +93,7 @@ async function main() {
   try {
     const root = await fetch(`${BASE}/`);
     const home = await root.text();
-    check('web app served', root.status === 200 && /AirGap/i.test(home), `HTTP ${root.status}`);
+    check('web app served', root.status === 200 && /Valerate/i.test(home), `HTTP ${root.status}`);
 
     await alice.connect();
     await bob.connect();
@@ -135,6 +135,48 @@ async function main() {
     bob.send({ type: 'chat_message', channelId: `dm_${ALICE}_${BOB}`, text: 'secret dm' });
     const dm = await alice.waitFor((m) => m.type === 'new_message' && m.message?.text === 'secret dm', 'DM');
     check('direct message delivered', dm.message?.channelId === `dm_${ALICE}_${BOB}`);
+
+    // WebRTC signaling relay (the server is the signaling channel for calls).
+    const offer = { type: 'offer', sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n' };
+    alice.send({ type: 'webrtc_call_invite', targetUser: BOB, isVideo: true, offer });
+    const invite = await bob.waitFor(
+      (m) => m.type === 'webrtc_call_invite' && m.fromUser === ALICE,
+      'call invite'
+    );
+    check('call invite relayed', invite.isVideo === true && invite.offer?.type === 'offer');
+
+    const answer = { type: 'answer', sdp: 'v=0\r\no=- 2 2 IN IP4 127.0.0.1\r\n' };
+    bob.send({ type: 'webrtc_call_answer', targetUser: ALICE, answer });
+    const answerRelayed = await alice.waitFor(
+      (m) => m.type === 'webrtc_call_answer' && m.fromUser === BOB,
+      'call answer'
+    );
+    check('call answer relayed', answerRelayed.answer?.type === 'answer');
+
+    const candidate = {
+      candidate: 'candidate:1 1 udp 2122260223 127.0.0.1 50000 typ host',
+      sdpMid: '0',
+      sdpMLineIndex: 0,
+    };
+    bob.send({ type: 'webrtc_ice_candidate', targetUser: ALICE, candidate });
+    const ice = await alice.waitFor(
+      (m) => m.type === 'webrtc_ice_candidate' && m.fromUser === BOB,
+      'ice candidate'
+    );
+    check('ICE candidate relayed', ice.candidate?.candidate === candidate.candidate);
+
+    alice.send({ type: 'webrtc_call_hangup', targetUser: BOB });
+    await bob.waitFor((m) => m.type === 'webrtc_call_hangup' && m.fromUser === ALICE, 'call hangup');
+    check('call hangup relayed', true);
+
+    // A call to an unknown user must be dropped, and must not break the server.
+    alice.send({ type: 'webrtc_call_invite', targetUser: `ghost-${suffix}`, isVideo: false, offer });
+    alice.send({ type: 'chat_message', channelId: 'general', text: 'still alive after bad call' });
+    const alive = await alice.waitFor(
+      (m) => m.type === 'new_message' && m.message?.text === 'still alive after bad call',
+      'server still responsive after bad call'
+    );
+    check('call to unknown user ignored', Boolean(alive.message?.id));
 
     const upload = await fetch(`${BASE}/api/upload?filename=test-note.txt`, {
       method: 'POST',

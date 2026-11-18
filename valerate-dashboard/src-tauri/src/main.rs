@@ -122,7 +122,7 @@ fn resolve_node(root: &std::path::Path) -> PathBuf {
 }
 
 /// Finds the desktop client executable in both the source tree layout and the
-/// portable distribution layout.
+/// portable distribution layout (Windows .exe, macOS .app, or bare binary).
 fn resolve_client_exe(root: &std::path::Path) -> Option<PathBuf> {
     if let Ok(path) = std::env::var("VALERATE_CLIENT_EXE") {
         let candidate = PathBuf::from(path);
@@ -130,18 +130,71 @@ fn resolve_client_exe(root: &std::path::Path) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
-    let exe_name = if cfg!(windows) {
-        "offline-tauri-client.exe"
-    } else {
-        "offline-tauri-client"
-    };
-    let candidates = [
-        root.join("offline-tauri-client").join("src-tauri").join("target").join("release").join(exe_name),
-        root.join("offline-tauri-client").join("src-tauri").join("target").join("debug").join(exe_name),
-        root.join("client").join(exe_name),
-        root.join("client").join(if cfg!(windows) { "AirGap Messenger.exe" } else { "AirGap Messenger" }),
-        root.join(exe_name),
-    ];
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+
+    #[cfg(windows)]
+    {
+        candidates.push(
+            root.join("offline-tauri-client")
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("offline-tauri-client.exe"),
+        );
+        candidates.push(
+            root.join("offline-tauri-client")
+                .join("src-tauri")
+                .join("target")
+                .join("debug")
+                .join("offline-tauri-client.exe"),
+        );
+        candidates.push(root.join("client").join("offline-tauri-client.exe"));
+        candidates.push(root.join("client").join("Valerate Messenger.exe"));
+        candidates.push(root.join("offline-tauri-client.exe"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Bundled .app from `tauri build` / the macOS portable package.
+        let app_names = ["Valerate Messenger.app", "offline-tauri-client.app"];
+        for app_name in app_names {
+            let app = root.join("client").join(app_name);
+            candidates.push(app.join("Contents").join("MacOS").join("offline-tauri-client"));
+            candidates.push(app.join("Contents").join("MacOS").join("Valerate Messenger"));
+            candidates.push(root.join(app_name).join("Contents").join("MacOS").join("offline-tauri-client"));
+        }
+        candidates.push(
+            root.join("offline-tauri-client")
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("offline-tauri-client"),
+        );
+        candidates.push(
+            root.join("offline-tauri-client")
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("bundle")
+                .join("macos")
+                .join("Valerate Messenger.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("offline-tauri-client"),
+        );
+        candidates.push(
+            root.join("offline-tauri-client")
+                .join("src-tauri")
+                .join("target")
+                .join("debug")
+                .join("offline-tauri-client"),
+        );
+        candidates.push(root.join("client").join("offline-tauri-client"));
+        candidates.push(root.join("offline-tauri-client-bin"));
+        candidates.push(root.join("offline-tauri-client"));
+    }
+
     candidates.into_iter().find(|candidate| candidate.exists())
 }
 
@@ -189,6 +242,25 @@ fn port_owner_pid(port: u16) -> Option<u32> {
     None
 }
 
+#[cfg(unix)]
+fn port_owner_pid(port: u16) -> Option<u32> {
+    let output = Command::new("lsof")
+        .args([
+            "-nP",
+            &format!("-iTCP:{}", port),
+            "-sTCP:LISTEN",
+            "-t",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.trim().parse::<u32>().ok())
+}
+
 /// Returns true when the HTTP service on `port` answers with the Valerate app.
 fn looks_like_valerate_server(port: u16) -> bool {
     let addr = match format!("127.0.0.1:{}", port).parse::<SocketAddr>() {
@@ -214,7 +286,7 @@ fn looks_like_valerate_server(port: u16) -> bool {
             Ok(0) => break,
             Ok(n) => {
                 collected.extend_from_slice(&buffer[..n]);
-                if String::from_utf8_lossy(&collected).contains("AirGap") {
+                if String::from_utf8_lossy(&collected).contains("Valerate") {
                     break;
                 }
             }
@@ -223,7 +295,7 @@ fn looks_like_valerate_server(port: u16) -> bool {
     }
     let response = String::from_utf8_lossy(&collected);
     (response.starts_with("HTTP/1.1 200") || response.starts_with("HTTP/1.0 200"))
-        && response.contains("AirGap")
+        && response.contains("Valerate")
 }
 
 #[cfg(windows)]
@@ -233,6 +305,17 @@ fn kill_pid(pid: u32) -> bool {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
@@ -264,22 +347,19 @@ fn start_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, St
     // If a previous Valerate server survived a dashboard crash/close, it still
     // holds port 8080. Stop that orphan so the new instance can bind cleanly
     // instead of failing with EADDRINUSE.
-    #[cfg(windows)]
-    {
-        if let Some(pid) = port_owner_pid(8080) {
-            if looks_like_valerate_server(8080) {
-                emit_log(&app, &server_id, "server", "system", &format!(
-                    "[!] Stopping previous Valerate server (PID {}) that was still running...", pid
-                ));
-                if kill_pid(pid) {
-                    emit_log(&app, &server_id, "server", "system", "[+] Previous server stopped.");
-                } else {
-                    emit_log(&app, &server_id, "server", "stderr", "[!] Could not stop the previous server; it may still hold port 8080.");
-                }
-                thread::sleep(Duration::from_millis(500));
+    if let Some(pid) = port_owner_pid(8080) {
+        if looks_like_valerate_server(8080) {
+            emit_log(&app, &server_id, "server", "system", &format!(
+                "[!] Stopping previous Valerate server (PID {}) that was still running...", pid
+            ));
+            if kill_pid(pid) {
+                emit_log(&app, &server_id, "server", "system", "[+] Previous server stopped.");
             } else {
-                emit_log(&app, &server_id, "server", "system", "[!] Port 8080 is used by another application; the server will use the next free port.");
+                emit_log(&app, &server_id, "server", "stderr", "[!] Could not stop the previous server; it may still hold port 8080.");
             }
+            thread::sleep(Duration::from_millis(500));
+        } else {
+            emit_log(&app, &server_id, "server", "system", "[!] Port 8080 is used by another application; the server will use the next free port.");
         }
     }
 
@@ -305,7 +385,7 @@ fn start_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, St
     let pid = child.id();
 
     emit_log(&app, &server_id, "server", "system", &format!("[+] Server process started with PID {}", pid));
-    emit_status(&app, &server_id, "server", "AirGap Server (Node.js)", true, Some(pid));
+    emit_status(&app, &server_id, "server", "Valerate Server (Node.js)", true, Some(pid));
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -315,7 +395,7 @@ fn start_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, St
         server_id.clone(),
         ManagedProcess {
             kind: "server".to_string(),
-            title: "AirGap Server (Node.js)".to_string(),
+            title: "Valerate Server (Node.js)".to_string(),
             child: Arc::clone(&child_arc),
         },
     );
@@ -361,7 +441,7 @@ fn start_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, St
                     Ok(Some(status)) => {
                         let code = status.code().unwrap_or(-1);
                         emit_log(&app_clone3, &sid_clone3, "server", "system", &format!("[-] Server process exited with code {}", code));
-                        emit_status(&app_clone3, &sid_clone3, "server", "AirGap Server (Node.js)", false, None);
+                        emit_status(&app_clone3, &sid_clone3, "server", "Valerate Server (Node.js)", false, None);
                         *guard = None;
                         break;
                     }
@@ -391,7 +471,7 @@ fn stop_server(app: AppHandle, state: State<'_, AppState>) -> Result<String, Str
             let pid = c.id();
             let _ = c.kill();
             emit_log(&app, &server_id, "server", "system", &format!("[!] Killed server process (PID {})", pid));
-            emit_status(&app, &server_id, "server", "AirGap Server (Node.js)", false, None);
+            emit_status(&app, &server_id, "server", "Valerate Server (Node.js)", false, None);
             return Ok(format!("Server process {} terminated", pid));
         }
     }
@@ -587,24 +667,21 @@ fn wipe_all_data(app: AppHandle, state: State<'_, AppState>, confirm: String) ->
                 let _ = c.kill();
                 let _ = c.wait();
                 emit_log(&app, &server_id, "server", "system", &format!("[!] Stopped server (PID {}) before wiping data", pid));
-                emit_status(&app, &server_id, "server", "AirGap Server (Node.js)", false, None);
+                emit_status(&app, &server_id, "server", "Valerate Server (Node.js)", false, None);
             }
         }
     }
 
     // 2. Also stop a server started outside the dashboard (for example via
-    //    "Start Server Only.bat"), otherwise its files stay locked.
-    #[cfg(windows)]
-    {
-        if let Some(pid) = port_owner_pid(8080) {
-            if looks_like_valerate_server(8080) {
-                emit_log(&app, &server_id, "server", "system", &format!("[!] Stopping external Valerate server (PID {}) before wiping data", pid));
-                kill_pid(pid);
-            }
+    //    "Start Server Only"), otherwise its files stay locked.
+    if let Some(pid) = port_owner_pid(8080) {
+        if looks_like_valerate_server(8080) {
+            emit_log(&app, &server_id, "server", "system", &format!("[!] Stopping external Valerate server (PID {}) before wiping data", pid));
+            kill_pid(pid);
         }
     }
 
-    // Give Windows a moment to release the file handles.
+    // Give the OS a moment to release the file handles.
     thread::sleep(Duration::from_millis(600));
 
     // 3. Delete the account database, chats, personal vault, audit log and

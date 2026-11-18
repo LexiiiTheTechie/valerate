@@ -38,6 +38,7 @@ dist/
 target/
 */target/
 */*/target/
+.cargo-target/
 
 # Packaged portable release
 *.zip

@@ -1,8 +1,8 @@
 [package]
 name = "offline-tauri-client"
 version = "0.1.0"
-description = "AirGap LAN Desktop Client"
-authors = ["AirGap Offline Team"]
+description = "Valerate LAN Desktop Client"
+authors = ["Valerate Offline Team"]
 edition = "2021"
 
 [build-dependencies]

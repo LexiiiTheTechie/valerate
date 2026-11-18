@@ -109,6 +109,25 @@ Output: `dist\Valerate-Portable\` (and zip it for distribution). The bundle cont
 
 A fresh bundle contains **no accounts and no data**. The server creates an empty database on first start.
 
+## Portable macOS build
+
+```bash
+chmod +x ./build-portable-macos.sh
+./build-portable-macos.sh
+```
+
+Output: `dist/Valerate-macOS/`. The bundle contains:
+
+- `Valerate Control Center.app` (and `valerate-dashboard` binary)
+- `client/Valerate Messenger.app` (and bare client binary)
+- `offline-app/` (server + web client)
+- `node/node` (bundled runtime)
+- Launchers: `Start Valerate.command`, `Start Server Only.command`, `Generate Certificates.command`, `Reset Password.command`
+
+Double-click **Start Valerate.command**. If macOS blocks it the first time, right-click → Open, or run `xattr -cr dist/Valerate-macOS`.
+
+TLS certs on macOS/Linux: `./offline-app/gen_certs.sh` (or the Generate Certificates.command launcher).
+
 ---
 
 ## Configuration
